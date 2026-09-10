@@ -1,6 +1,7 @@
 import time
 import os
 import logging
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import chromadb
@@ -20,30 +21,50 @@ class RAGService:
         self.chroma_client: Optional[chromadb.PersistentClient] = None
         self.collection: Optional[chromadb.Collection] = None
         self.is_loaded: bool = False
+        self.is_loading: bool = False
+        self._lock = threading.Lock()
+
+    def load_in_background(self):
+        """Starts background loading of models and vector DB if not already loaded."""
+        if self.is_loaded or self.is_loading:
+            return
+        
+        thread = threading.Thread(target=self.load, kwargs={"force_reindex": False}, daemon=True)
+        thread.start()
 
     def load(self, force_reindex: bool = False):
-        """Initializes the embedding model and vector database."""
-        logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL_NAME}...")
-        self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL_NAME)
-        
-        logger.info(f"Initializing ChromaDB persistent storage at {settings.VECTOR_STORE_DIR}...")
-        settings.VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
-        self.chroma_client = chromadb.PersistentClient(path=str(settings.VECTOR_STORE_DIR))
-
-        # Get or create collection with cosine similarity
-        self.collection = self.chroma_client.get_or_create_collection(
-            name=settings.CHROMA_COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"}
-        )
-        
-        # Auto-ingest documents if collection is empty or reindex is requested
-        if self.collection.count() == 0 or force_reindex:
-            logger.info("Vector collection is empty or reindex requested. Ingesting raw documents...")
-            self.ingest_documents(force_reindex=force_reindex)
-        else:
-            logger.info(f"Loaded existing vector collection with {self.collection.count()} article chunks.")
+        """Initializes embedding model and vector database (thread-safe)."""
+        with self._lock:
+            if self.is_loaded and not force_reindex:
+                return
             
-        self.is_loaded = True
+            self.is_loading = True
+            try:
+                logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL_NAME}...")
+                self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL_NAME)
+                
+                logger.info(f"Initializing ChromaDB persistent storage at {settings.VECTOR_STORE_DIR}...")
+                settings.VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
+                self.chroma_client = chromadb.PersistentClient(path=str(settings.VECTOR_STORE_DIR))
+
+                # Get or create collection with cosine similarity
+                self.collection = self.chroma_client.get_or_create_collection(
+                    name=settings.CHROMA_COLLECTION_NAME,
+                    metadata={"hnsw:space": "cosine"}
+                )
+                
+                # Auto-ingest documents if collection is empty or reindex requested
+                if self.collection.count() == 0 or force_reindex:
+                    logger.info("Vector collection is empty or reindex requested. Ingesting raw documents...")
+                    self.ingest_documents(force_reindex=force_reindex)
+                else:
+                    logger.info(f"Loaded existing vector collection with {self.collection.count()} article chunks.")
+                    
+                self.is_loaded = True
+            except Exception as e:
+                logger.error(f"Error loading RAG service: {e}")
+            finally:
+                self.is_loading = False
 
     def ingest_documents(self, force_reindex: bool = False):
         """
@@ -62,7 +83,6 @@ class RAGService:
             raw_text = extract_pdf_text(pdf_file)
             doc_chunks = parse_law_articles(raw_text, law_title)
             all_chunks.extend(doc_chunks)
-            logger.info(f"Extracted {len(doc_chunks)} article chunks from {pdf_file.name}")
 
         if not all_chunks:
             logger.warning("No article chunks parsed from documents.")
@@ -79,15 +99,14 @@ class RAGService:
         ids = [c["chunk_id"] for c in all_chunks]
 
         logger.info(f"Generating embeddings for {len(texts)} chunks with {settings.EMBEDDING_MODEL_NAME}...")
-        # Compute all embeddings in RAM FIRST before touching database
         embeddings = self.embedding_model.encode(texts, show_progress_bar=False, batch_size=32)
 
-        # Atomic Collection Reset/Swap
-        if force_reindex or self.collection.count() > 0:
+        # Atomic Collection Swap
+        if force_reindex or (self.collection and self.collection.count() > 0):
             try:
                 self.chroma_client.delete_collection(settings.CHROMA_COLLECTION_NAME)
-            except Exception as e:
-                logger.warning(f"Note deleting old collection: {e}")
+            except Exception:
+                pass
             
             self.collection = self.chroma_client.create_collection(
                 name=settings.CHROMA_COLLECTION_NAME,
@@ -141,7 +160,7 @@ class RAGService:
         """Retrieves context chunks and generates a grounded Egyptian legal answer."""
         start_time = time.time()
         
-        if not self.is_loaded or not self.collection:
+        if not self.is_loaded:
             self.load()
 
         # Step 1: Embed question and query ChromaDB
@@ -275,10 +294,17 @@ class RAGService:
         )
 
     def health_status(self) -> HealthResponse:
-        """Returns health diagnostics of RAG service."""
-        count = self.collection.count() if self.collection else 0
+        """Returns health diagnostics of RAG service instantaneously."""
+        count = self.collection.count() if (self.collection and self.is_loaded) else 0
+        if self.is_loaded:
+            status_str = "healthy"
+        elif self.is_loading:
+            status_str = "initializing"
+        else:
+            status_str = "standby"
+
         return HealthResponse(
-            status="healthy" if self.is_loaded else "initializing",
+            status=status_str,
             vector_store_loaded=self.is_loaded,
             total_chunks=count,
             embedding_model=settings.EMBEDDING_MODEL_NAME,

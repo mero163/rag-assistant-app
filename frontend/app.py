@@ -96,17 +96,18 @@ st.markdown("""
 BACKEND_URL_INPUT = st.sidebar.text_input("رابط الـ Backend API", value="http://127.0.0.1:8000")
 BACKEND_URL = BACKEND_URL_INPUT.strip().rstrip("/")
 
-# Function to check backend health
-def get_backend_health():
+# Cached backend health check (valid for 4 seconds) to prevent request collisions
+@st.cache_data(ttl=4, show_spinner=False)
+def check_health_cached(url: str):
     urls_to_try = [
-        f"{BACKEND_URL}/health",
-        f"{BACKEND_URL}/api/health",
+        f"{url}/health",
+        f"{url}/api/health",
         "http://127.0.0.1:8000/health",
         "http://localhost:8000/health"
     ]
-    for url in urls_to_try:
+    for target in urls_to_try:
         try:
-            res = requests.get(url, timeout=5)
+            res = requests.get(target, timeout=3)
             if res.status_code == 200:
                 return res.json()
         except Exception:
@@ -115,10 +116,15 @@ def get_backend_health():
 
 # Sidebar Controls
 st.sidebar.markdown("### ⚙️ إعدادات النظام")
-health_data = get_backend_health()
+health_data = check_health_cached(BACKEND_URL)
 
-if health_data and health_data.get("status") in ["healthy", "online"]:
-    st.sidebar.success("🟢 الاتصال بالـ Backend نشط")
+if health_data and health_data.get("status") in ["healthy", "online", "initializing", "standby"]:
+    status_str = health_data.get("status", "")
+    if status_str == "initializing":
+        st.sidebar.warning("🟡 جاري تجهيز وتحميل قاعدة البيانات والمتجهات...")
+    else:
+        st.sidebar.success("🟢 الاتصال بالـ Backend نشط")
+    
     st.sidebar.markdown(f"**عدد القطع المفهرسة:** `{health_data.get('total_chunks', 0)}`")
     st.sidebar.markdown(f"**نموذج التضمين:** `{health_data.get('embedding_model', 'BAAI/bge-m3')}`")
     active_llm = health_data.get("llm_model", "qwen2.5:3b")
@@ -137,11 +143,12 @@ selected_model = st.sidebar.selectbox(
 top_k = st.sidebar.slider("عدد المواد القانونية المسترجعة (Top-K):", min_value=1, max_value=10, value=5)
 
 if st.sidebar.button("🔄 إعادة فهرسة المستندات"):
-    with st.spinner("جاري إعادة بناء وتنظيف الفهرس القانوني... (قد يستغرق 1-2 دقيقة)"):
+    with st.spinner("جاري إعادة بناء وتنظيف الفهرس القانوني..."):
         try:
             res = requests.post(f"{BACKEND_URL}/reindex", timeout=300)
             if res.status_code == 200:
                 st.sidebar.success("✅ تمت إعادة الفهرسة بنجاح!")
+                st.cache_data.clear()
                 st.rerun()
             else:
                 st.sidebar.error(f"❌ فشلت الفهرسة: {res.text}")
@@ -201,14 +208,14 @@ if prompt_to_process:
 
     # Process RAG Request
     with st.chat_message("assistant"):
-        with st.spinner("جاري البحث في التشريعات القانونية وتوليد الإجابة..."):
+        with st.spinner("جاري استرجاع المواد القانونية وتوليد الإجابة من التشريعات..."):
             try:
                 payload = {
                     "question": prompt_to_process,
                     "top_k": top_k,
                     "model_name": selected_model
                 }
-                response = requests.post(f"{BACKEND_URL}/query", json=payload, timeout=90)
+                response = requests.post(f"{BACKEND_URL}/query", json=payload, timeout=120)
                 
                 if response.status_code == 200:
                     data = response.json()
