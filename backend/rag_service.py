@@ -140,7 +140,9 @@ class RAGService:
                 elif isinstance(m, dict) and 'name' in m:
                     available_names.append(m['name'])
         except Exception as e:
-            logger.warning(f"Failed to check Ollama models: {e}")
+            logger.warning(f"Failed to check Ollama models (will use fallback): {e}")
+            # Return fallback immediately without blocking
+            return settings.FALLBACK_LLM_MODEL
 
         # If a requested model is passed, check if it exists in Ollama
         if requested_model and available_names:
@@ -297,7 +299,18 @@ class RAGService:
 
     def health_status(self) -> HealthResponse:
         """Returns health diagnostics of RAG service instantaneously."""
-        count = self.collection.count() if (self.collection and self.is_loaded) else 0
+        try:
+            count = 0
+            if self.collection and self.is_loaded:
+                try:
+                    count = self.collection.count()
+                except Exception as e:
+                    logger.warning(f"Could not get collection count: {e}")
+                    count = 0
+        except Exception as e:
+            logger.warning(f"Error accessing collection: {e}")
+            count = 0
+            
         if self.is_loaded:
             status_str = "healthy"
         elif self.is_loading:
