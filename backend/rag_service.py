@@ -24,28 +24,22 @@ class RAGService:
         self.is_loading: bool = False
         self._lock = threading.Lock()
 
-    def load_in_background(self):
-        """Starts background loading of models and vector DB if not already loaded."""
-        if self.is_loaded or self.is_loading:
-            return
-        
-        thread = threading.Thread(target=self.load, kwargs={"force_reindex": False}, daemon=True)
-        thread.start()
-
     def load(self, force_reindex: bool = False):
-        """Initializes embedding model and vector database (thread-safe)."""
+        """Initializes embedding model and vector database safely."""
         with self._lock:
             if self.is_loaded and not force_reindex:
                 return
             
             self.is_loading = True
             try:
-                logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL_NAME}...")
-                self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL_NAME)
+                if self.embedding_model is None:
+                    logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL_NAME}...")
+                    self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL_NAME)
                 
-                logger.info(f"Initializing ChromaDB persistent storage at {settings.VECTOR_STORE_DIR}...")
-                settings.VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
-                self.chroma_client = chromadb.PersistentClient(path=str(settings.VECTOR_STORE_DIR))
+                if self.chroma_client is None or force_reindex:
+                    logger.info(f"Initializing ChromaDB persistent storage at {settings.VECTOR_STORE_DIR}...")
+                    settings.VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
+                    self.chroma_client = chromadb.PersistentClient(path=str(settings.VECTOR_STORE_DIR))
 
                 # Get or create collection with cosine similarity
                 self.collection = self.chroma_client.get_or_create_collection(

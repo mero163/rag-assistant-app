@@ -42,7 +42,7 @@ def test_health_endpoint():
     response = client.get("/health")
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] in ["healthy", "initializing", "online"]
+    assert data["status"] in ["healthy", "initializing", "online", "standby"]
     assert "vector_store_loaded" in data
     assert "total_chunks" in data
 
