@@ -17,6 +17,8 @@
 - 🤖 نموذج لغوي قوي **Qwen 2.5**
 - ⚡ واجهة مستخدم حديثة بـ **Streamlit**
 
+<img width="1366" height="701" alt="image" src="https://github.com/user-attachments/assets/5f4e4d70-f649-4397-b188-cabc2693b6d2" />
+
 ---
 
 ## 🏗️ معمارية النظام
