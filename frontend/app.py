@@ -48,18 +48,6 @@ st.markdown("""
         font-size: 1.1rem;
     }
     
-    /* Source Badges */
-    .article-badge {
-        display: inline-block;
-        background-color: #0284c7;
-        color: #ffffff;
-        padding: 0.25rem 0.75rem;
-        border-radius: 9999px;
-        font-weight: 600;
-        font-size: 0.875rem;
-        margin: 0.25rem;
-    }
-    
     .source-card {
         background-color: #1e293b;
         border-right: 4px solid #38bdf8;
@@ -108,7 +96,7 @@ st.markdown("""
 BACKEND_URL_INPUT = st.sidebar.text_input("رابط الـ Backend API", value="http://127.0.0.1:8000")
 BACKEND_URL = BACKEND_URL_INPUT.strip().rstrip("/")
 
-# Function to check backend health with retry fallback
+# Function to check backend health
 def get_backend_health():
     urls_to_try = [
         f"{BACKEND_URL}/health",
@@ -118,7 +106,7 @@ def get_backend_health():
     ]
     for url in urls_to_try:
         try:
-            res = requests.get(url, timeout=10)
+            res = requests.get(url, timeout=5)
             if res.status_code == 200:
                 return res.json()
         except Exception:
@@ -133,6 +121,8 @@ if health_data and health_data.get("status") in ["healthy", "online"]:
     st.sidebar.success("🟢 الاتصال بالـ Backend نشط")
     st.sidebar.markdown(f"**عدد القطع المفهرسة:** `{health_data.get('total_chunks', 0)}`")
     st.sidebar.markdown(f"**نموذج التضمين:** `{health_data.get('embedding_model', 'BAAI/bge-m3')}`")
+    active_llm = health_data.get("llm_model", "qwen2.5:3b")
+    st.sidebar.markdown(f"**النموذج النشط حالياً:** `{active_llm}`")
 else:
     st.sidebar.error("🔴 متعذر الاتصال بالـ Backend (تأكد من تشغيل uvicorn backend.main:app)")
 
@@ -140,21 +130,21 @@ st.sidebar.markdown("---")
 
 selected_model = st.sidebar.selectbox(
     "نموذج الذكاء الاصطناعي (LLM):",
-    options=["qwen2.5:7b", "qwen2.5:3b", "aya-expanse:8b", "mistral:latest"],
+    options=["qwen2.5:3b", "qwen2.5:7b", "mistral:latest", "aya-expanse:8b"],
     index=0
 )
 
 top_k = st.sidebar.slider("عدد المواد القانونية المسترجعة (Top-K):", min_value=1, max_value=10, value=5)
 
 if st.sidebar.button("🔄 إعادة فهرسة المستندات"):
-    with st.spinner("جاري إعادة فهرسة المستندات..."):
+    with st.spinner("جاري إعادة بناء وتنظيف الفهرس القانوني... (قد يستغرق 1-2 دقيقة)"):
         try:
-            res = requests.post(f"{BACKEND_URL}/reindex", timeout=120)
+            res = requests.post(f"{BACKEND_URL}/reindex", timeout=300)
             if res.status_code == 200:
-                st.sidebar.success("✅ تمت الفهرسة بنجاح!")
+                st.sidebar.success("✅ تمت إعادة الفهرسة بنجاح!")
                 st.rerun()
             else:
-                st.sidebar.error("❌ فشلت الفهرسة")
+                st.sidebar.error(f"❌ فشلت الفهرسة: {res.text}")
         except Exception as e:
             st.sidebar.error(f"خطأ: {e}")
 
@@ -227,15 +217,15 @@ if prompt_to_process:
                     art_nums = data.get("article_numbers", [])
                     exec_time = data.get("processing_time_sec", 0.0)
 
-                    # Append Article Badges if present
-                    full_display_answer = answer
+                    # Display clean text answer
+                    st.markdown(answer)
+
+                    # Render Article Badges nicely using markdown code pills
                     if art_nums:
-                        badges_html = " ".join([f"<span class='article-badge'>مادة {num}</span>" for num in art_nums])
-                        full_display_answer += f"\n\n**📌 أرقام المواد المستند إليها:**\n\n{badges_html}"
+                        badge_str = " ".join([f"`مادة ({num})`" for num in art_nums])
+                        st.markdown(f"**📌 أرقام المواد المستند إليها:**\n{badge_str}")
 
-                    full_display_answer += f"\n\n_<small>⏱️ زمن المعالجة: {exec_time} ثانية</small>_"
-
-                    st.markdown(full_display_answer, unsafe_allow_html=True)
+                    st.markdown(f"_<small>⏱️ زمن المعالجة: {exec_time} ثانية</small>_", unsafe_allow_html=True)
 
                     if sources:
                         with st.expander("📚 النصوص والمواد القانونية المسترجعة"):
@@ -251,7 +241,7 @@ if prompt_to_process:
                     # Save to state
                     st.session_state.messages.append({
                         "role": "assistant",
-                        "content": full_display_answer,
+                        "content": answer,
                         "sources": sources
                     })
 

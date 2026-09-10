@@ -92,7 +92,7 @@ class RAGService:
         ids = [c["chunk_id"] for c in all_chunks]
 
         logger.info(f"Generating embeddings for {len(texts)} chunks with {settings.EMBEDDING_MODEL_NAME}...")
-        embeddings = self.embedding_model.encode(texts, show_progress_bar=False, batch_size=16)
+        embeddings = self.embedding_model.encode(texts, show_progress_bar=False, batch_size=32)
 
         # Batch insert into ChromaDB
         batch_size = 100
@@ -108,27 +108,32 @@ class RAGService:
         logger.info(f"Successfully indexed {self.collection.count()} chunks into ChromaDB.")
 
     def get_available_llm(self, requested_model: Optional[str] = None) -> str:
-        """Selects the best available Ollama model."""
-        if requested_model:
-            return requested_model
-            
+        """Dynamically validates Ollama models and falls back to installed models."""
+        available_names = []
         try:
             resp = ollama.list()
             models_list = getattr(resp, 'models', []) if hasattr(resp, 'models') else (resp.get('models', []) if isinstance(resp, dict) else [])
-            
-            available_names = []
             for m in models_list:
                 if hasattr(m, 'model'):
                     available_names.append(m.model)
                 elif isinstance(m, dict) and 'name' in m:
                     available_names.append(m['name'])
-
-            # Preference: qwen2.5:7b -> aya-expanse:8b -> qwen2.5:3b -> mistral
-            for candidate in [settings.DEFAULT_LLM_MODEL, "aya-expanse:8b", settings.FALLBACK_LLM_MODEL, "mistral:latest"]:
-                if any(candidate in name for name in available_names):
-                    return candidate
         except Exception as e:
             logger.warning(f"Failed to check Ollama models: {e}")
+
+        # If a requested model is passed, check if it exists in Ollama
+        if requested_model and available_names:
+            for name in available_names:
+                if requested_model == name or requested_model in name or name in requested_model:
+                    return name
+
+        # Preference hierarchy among installed models
+        if available_names:
+            for candidate in [settings.DEFAULT_LLM_MODEL, settings.FALLBACK_LLM_MODEL, "mistral:latest", "mistral"]:
+                for name in available_names:
+                    if candidate in name:
+                        return name
+            return available_names[0]
 
         return settings.FALLBACK_LLM_MODEL
 
@@ -204,7 +209,7 @@ class RAGService:
 قواعد صارمة للإجابة:
 1. استند فقط وحصرياً إلى المعلومات الواردة في النصوص المرجعية المرفقة.
 2. اذكر رقم المادة واسم القانون بالحرف كما هو مكتوب في النصوص المرفقة (مثال: طبقاً للمادة 2 من قانون المرور...).
-3. لا تقم بتخمين أو إضافة أي معلومات قانونية من خارج النصوص المرفقة.
+3. لا تقم بتخمين أو إضافة أي معلومات قانونية من خارج النصوص المرجعية.
 4. إذا لم تجد الإجابة في النصوص المرفقة، اكتب فقط: "لا توجد معلومات كافية في المستندات المتاحة للإجابة على هذا السؤال."
 
 ### النصوص المرجعية:
@@ -216,7 +221,7 @@ class RAGService:
 ### الإجابة (مع ذكر أرقام المواد والنصوص القانونية بدقة):"""
 
         selected_model = self.get_available_llm(model_name)
-        logger.info(f"Generating LLM response using model: {selected_model}...")
+        logger.info(f"Generating LLM response using verified Ollama model: {selected_model}...")
 
         try:
             response = ollama.chat(
@@ -231,7 +236,21 @@ class RAGService:
             answer_text = response["message"]["content"].strip()
         except Exception as e:
             logger.error(f"Error during Ollama generation with {selected_model}: {e}")
-            answer_text = f"عذراً، حدث خطأ أثناء الاتصال بنموذج الذكاء الاصطناعي: {str(e)}"
+            # If requested model failed, try fallback
+            fallback_model = settings.FALLBACK_LLM_MODEL
+            if selected_model != fallback_model:
+                try:
+                    logger.info(f"Retrying with fallback model: {fallback_model}...")
+                    response = ollama.chat(
+                        model=fallback_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        options={"temperature": 0.05}
+                    )
+                    answer_text = response["message"]["content"].strip()
+                except Exception as fb_e:
+                    answer_text = f"عذراً، حدث خطأ أثناء الاتصال بنموذج الذكاء الاصطناعي: {str(fb_e)}"
+            else:
+                answer_text = f"عذراً، حدث خطأ أثناء الاتصال بنموذج الذكاء الاصطناعي: {str(e)}"
 
         elapsed_time = round(time.time() - start_time, 2)
 
