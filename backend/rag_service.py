@@ -29,12 +29,6 @@ class RAGService:
         logger.info(f"Initializing ChromaDB persistent storage at {settings.VECTOR_STORE_DIR}...")
         settings.VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
         self.chroma_client = chromadb.PersistentClient(path=str(settings.VECTOR_STORE_DIR))
-        
-        if force_reindex:
-            try:
-                self.chroma_client.delete_collection(settings.CHROMA_COLLECTION_NAME)
-            except Exception:
-                pass
 
         # Get or create collection with cosine similarity
         self.collection = self.chroma_client.get_or_create_collection(
@@ -52,17 +46,10 @@ class RAGService:
         self.is_loaded = True
 
     def ingest_documents(self, force_reindex: bool = False):
-        """Scans raw_documents folder, cleans PDFs, chunks by article, and indexes into ChromaDB."""
-        if force_reindex and self.collection:
-            try:
-                self.chroma_client.delete_collection(settings.CHROMA_COLLECTION_NAME)
-                self.collection = self.chroma_client.create_collection(
-                    name=settings.CHROMA_COLLECTION_NAME,
-                    metadata={"hnsw:space": "cosine"}
-                )
-            except Exception as e:
-                logger.warning(f"Error resetting collection: {e}")
-
+        """
+        Scans raw_documents folder, cleans PDFs, chunks by article,
+        computes embeddings first, and then performs an atomic swap into ChromaDB.
+        """
         pdf_files = list(settings.RAW_DOCS_DIR.glob("*.pdf"))
         if not pdf_files:
             logger.warning(f"No PDF files found in {settings.RAW_DOCS_DIR}")
@@ -92,7 +79,20 @@ class RAGService:
         ids = [c["chunk_id"] for c in all_chunks]
 
         logger.info(f"Generating embeddings for {len(texts)} chunks with {settings.EMBEDDING_MODEL_NAME}...")
+        # Compute all embeddings in RAM FIRST before touching database
         embeddings = self.embedding_model.encode(texts, show_progress_bar=False, batch_size=32)
+
+        # Atomic Collection Reset/Swap
+        if force_reindex or self.collection.count() > 0:
+            try:
+                self.chroma_client.delete_collection(settings.CHROMA_COLLECTION_NAME)
+            except Exception as e:
+                logger.warning(f"Note deleting old collection: {e}")
+            
+            self.collection = self.chroma_client.create_collection(
+                name=settings.CHROMA_COLLECTION_NAME,
+                metadata={"hnsw:space": "cosine"}
+            )
 
         # Batch insert into ChromaDB
         batch_size = 100
@@ -154,8 +154,8 @@ class RAGService:
                 include=["documents", "metadatas", "distances"]
             )
         except Exception as e:
-            if "dimension" in str(e).lower():
-                logger.warning("Dimension mismatch detected in ChromaDB. Auto-reindexing with new embedding model...")
+            if "dimension" in str(e).lower() or (self.collection and self.collection.count() == 0):
+                logger.warning("Empty or mismatched collection detected in ChromaDB. Auto-reindexing...")
                 self.ingest_documents(force_reindex=True)
                 results = self.collection.query(
                     query_embeddings=[query_vector],
@@ -168,6 +168,19 @@ class RAGService:
         docs = results["documents"][0] if results["documents"] else []
         metas = results["metadatas"][0] if results["metadatas"] else []
         distances = results["distances"][0] if results["distances"] else []
+
+        # Auto-heal if collection returned 0 docs
+        if not docs and self.collection.count() == 0:
+            logger.warning("Collection was empty during query. Ingesting documents now...")
+            self.ingest_documents(force_reindex=True)
+            results = self.collection.query(
+                query_embeddings=[query_vector],
+                n_results=top_k,
+                include=["documents", "metadatas", "distances"]
+            )
+            docs = results["documents"][0] if results["documents"] else []
+            metas = results["metadatas"][0] if results["metadatas"] else []
+            distances = results["distances"][0] if results["distances"] else []
 
         sources: List[SourceChunk] = []
         article_numbers: List[str] = []
@@ -236,7 +249,6 @@ class RAGService:
             answer_text = response["message"]["content"].strip()
         except Exception as e:
             logger.error(f"Error during Ollama generation with {selected_model}: {e}")
-            # If requested model failed, try fallback
             fallback_model = settings.FALLBACK_LLM_MODEL
             if selected_model != fallback_model:
                 try:
