@@ -24,6 +24,14 @@ class RAGService:
         self.is_loading: bool = False
         self._lock = threading.Lock()
 
+    def load_in_background(self):
+        """Starts background loading of models and vector DB if not already loaded."""
+        if self.is_loaded or self.is_loading:
+            return
+        
+        thread = threading.Thread(target=self.load, kwargs={"force_reindex": False}, daemon=True)
+        thread.start()
+
     def load(self, force_reindex: bool = False):
         """Initializes embedding model and vector database safely."""
         with self._lock:
